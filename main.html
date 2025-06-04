@@ -29,6 +29,13 @@
             font-family: monospace;
             margin: 4px;
         }
+        #videoControls div {
+            margin-bottom: 4px;
+        }
+        #videoControls video {
+            width: 120px;
+            display: block;
+        }
 
 #graphView {
         margin-top: 10px;
@@ -57,6 +64,8 @@
         <button id="applyTwist">Apply</button>
         <div id="graphView"></div>
         <label>Speed: <input type="range" id="speedSlider" min="1" max="30" value="10"></label>
+        <div id="videoControls"></div>
+        <button id="startCams">Start Cameras</button>
     </div>
     <canvas id="graphCanvas" width="600" height="400" style="background:#111; margin-top:10px; display:block; border:1px solid #444;"></canvas>
 
@@ -78,11 +87,140 @@
         const uiDiv = document.getElementById('ui');
         const speedSlider = document.getElementById('speedSlider');
 
-        let boards = [], baseColors = [], twistTensor = [], numBoards = 12;
+        let boards = [], baseColors = [], twistTensor = [], colorBuffers = [], numBoards = 12;
+        let videos = [], videoCanvases = [], videoCtxs = [], lastFrames = [],
+            boardFilters = [], boardAlphas = [], videoDevices = [];
         let frameCount = 0, running = true;
         let zoom = .5;
         let panX = 0, panY = 0;
         let lastTouchDistance = null;
+
+        async function enumerateVideoDevices() {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            videoDevices = devices.filter(d => d.kind === 'videoinput');
+        }
+
+        function setupVideoUI() {
+            const vc = document.getElementById('videoControls');
+            vc.innerHTML = '';
+            for (let b = 0; b < numBoards; b++) {
+                const div = document.createElement('div');
+                const select = document.createElement('select');
+                select.id = 'camSelect' + b;
+                videoDevices.forEach((d, i) => {
+                    const opt = document.createElement('option');
+                    opt.value = d.deviceId;
+                    opt.textContent = d.label || 'Camera ' + (i + 1);
+                    select.appendChild(opt);
+                });
+                const filter = document.createElement('select');
+                filter.id = 'filterSelect' + b;
+                ['none','edge','motion-gauss','motion-moire'].forEach(f => {
+                    const opt = document.createElement('option');
+                    opt.value = f;
+                    opt.textContent = f;
+                    filter.appendChild(opt);
+                });
+                const alpha = document.createElement('input');
+                alpha.type = 'range';
+                alpha.min = 0; alpha.max = 1; alpha.step = 0.05;
+                alpha.value = 0.5;
+                alpha.id = 'alpha' + b;
+                alpha.oninput = () => { boardAlphas[b] = parseFloat(alpha.value); };
+                div.appendChild(document.createTextNode('B'+b+' '));
+                div.appendChild(select);
+                div.appendChild(filter);
+                div.appendChild(alpha);
+                vc.appendChild(div);
+            }
+        }
+
+        async function startVideoStreams() {
+            videos = []; videoCanvases = []; videoCtxs = []; lastFrames = [];
+            boardFilters = []; boardAlphas = [];
+            for (let b = 0; b < numBoards; b++) {
+                const deviceId = document.getElementById('camSelect'+b).value;
+                boardFilters[b] = document.getElementById('filterSelect'+b).value;
+                boardAlphas[b] = parseFloat(document.getElementById('alpha'+b).value);
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({video:{deviceId}});
+                    const vid = document.createElement('video');
+                    vid.autoplay = true; vid.srcObject = stream;
+                    videos.push(vid);
+                } catch(e) {
+                    videos.push(null);
+                }
+                const c = document.createElement('canvas');
+                c.width = gridW; c.height = gridH;
+                videoCanvases.push(c);
+                videoCtxs.push(c.getContext('2d'));
+                lastFrames.push(null);
+            }
+        }
+
+        function processVideoFrame(b) {
+            const vid = videos[b];
+            if (!vid) return null;
+            const ctxv = videoCtxs[b];
+            ctxv.drawImage(vid,0,0,gridW,gridH);
+            let frame = ctxv.getImageData(0,0,gridW,gridH);
+            const filter = boardFilters[b];
+            if (filter === 'edge') {
+                frame = applyEdge(frame);
+            } else if (filter === 'motion-gauss' || filter === 'motion-moire') {
+                frame = applyMotion(frame,b,filter==='motion-gauss');
+            }
+            lastFrames[b] = frame;
+            return frame;
+        }
+
+        function applyEdge(frame) {
+            const w = frame.width, h = frame.height;
+            const data = frame.data;
+            const out = new Uint8ClampedArray(data.length);
+            const kernel = [-1,-1,-1,-1,8,-1,-1,-1,-1];
+            for(let y=1;y<h-1;y++){
+                for(let x=1;x<w-1;x++){
+                    for(let c=0;c<3;c++){
+                        let idx=(y*w+x)*4+c;
+                        let sum=0, k=0;
+                        for(let ky=-1;ky<=1;ky++){
+                            for(let kx=-1;kx<=1;kx++){
+                                const i=((y+ky)*w+(x+kx))*4+c;
+                                sum+=data[i]*kernel[k++];
+                            }
+                        }
+                        out[idx]=Math.min(255,Math.max(0,sum+128));
+                    }
+                    out[(y*w+x)*4+3]=255;
+                }
+            }
+            frame.data.set(out);
+            return frame;
+        }
+
+        function applyMotion(frame,b,isGauss){
+            const prev=lastFrames[b];
+            if(!prev)return frame;
+            const len=frame.data.length;
+            for(let i=0;i<len;i+=4){
+                const diff=Math.abs(frame.data[i]-prev.data[i]);
+                frame.data[i]=frame.data[i]+diff*2;
+                frame.data[i+1]=frame.data[i+1]+diff*2;
+                frame.data[i+2]=frame.data[i+2]+diff*2;
+            }
+            if(isGauss){
+                // simple blur
+                const ctx=document.createElement('canvas').getContext('2d');
+                ctx.canvas.width=frame.width;ctx.canvas.height=frame.height;
+                ctx.putImageData(frame,0,0);
+                ctx.globalAlpha=0.5;
+                ctx.drawImage(ctx.canvas,1,0);
+                ctx.drawImage(ctx.canvas,-1,0);
+                frame=ctx.getImageData(0,0,frame.width,frame.height);
+            }
+            return frame;
+        }
 
         (function enableDragUI() {
             const ui = document.getElementById('ui');
@@ -471,15 +609,26 @@
         function updateColors() {
             for (let b = 0; b < numBoards; b++) {
                 const buf = colorBuffers[b],
-                base = baseColors[b];
+                    base = baseColors[b];
+                const frame = processVideoFrame(b);
                 for (let y = 0; y < gridH; y++) {
                     for (let x = 0; x < gridW; x++) {
                         const i = (y * gridW + x) * 4;
                         if (boards[b][y][x]) {
-                            buf[i] += base.r * 0.2;
-                            buf[i+1] += base.g * 0.2;
-                            buf[i+2] += base.b * 0.2;
-                            buf[i+3] += base.a * .1;
+                            if (frame) {
+                                const j = i;
+                                buf[i] = frame.data[j] / 255;
+                                buf[i+1] = frame.data[j+1] / 255;
+                                buf[i+2] = frame.data[j+2] / 255;
+                                buf[i+3] = boardAlphas[b];
+                            } else {
+                                buf[i] = base.r;
+                                buf[i+1] = base.g;
+                                buf[i+2] = base.b;
+                                buf[i+3] = boardAlphas[b];
+                            }
+                        } else {
+                            buf[i+3] *= 0.9;
                         }
                     }
                 }
@@ -499,13 +648,34 @@
                 for (let y = 0; y < gridH; y++) {
                     for (let x = 0; x < gridW; x++) {
                         const i = (y * gridW + x) * 4;
-                        const r = Math.min(.5, buf[i]%.5);
-                        const g = Math.min(.5, buf[i+1]%.5);
-                        const bVal = Math.min(.5, buf[i+2]%.5);
-                        const a = Math.min(.5, buf[i+3]%.5);
+                        const r = Math.min(.5, buf[i] % .5);
+                        const g = Math.min(.5, buf[i+1] % .5);
+                        const bVal = Math.min(.5, buf[i+2] % .5);
+                        const a = Math.min(.5, buf[i+3] % .5);
                         if (a > 0) {
                             ctx.fillStyle = `rgba(${r*255},${g*255},${bVal*255},${a})`;
                             ctx.fillRect(offsetX + x * drawSize, offsetY + y * drawSize, drawSize, drawSize);
+                        }
+                    }
+                }
+
+                // simple reflection of other boards
+                for (let j = 0; j < numBoards; j++) {
+                    if (j === b) continue;
+                    const other = colorBuffers[j];
+                    for (let y = 0; y < gridH; y++) {
+                        for (let x = 0; x < gridW; x++) {
+                            const i = (y * gridW + x) * 4;
+                            const oa = Math.min(.5, other[i+3] % .5);
+                            if (oa > 0) {
+                                const or = Math.min(.5, other[i] % .5);
+                                const og = Math.min(.5, other[i+1] % .5);
+                                const ob = Math.min(.5, other[i+2] % .5);
+                                ctx.fillStyle = `rgba(${or*255},${og*255},${ob*255},${oa*0.3})`;
+                                const rx = gridW - 1 - x;
+                                const ry = gridH - 1 - y;
+                                ctx.fillRect(offsetX + rx * drawSize, offsetY + ry * drawSize, drawSize, drawSize);
+                            }
                         }
                     }
                 }
@@ -534,7 +704,10 @@
             drawGraph(twistTensor); // Add this
             frameCount = 0;
             running = true;
-            zoom = 1
+            zoom = 1;
+            enumerateVideoDevices().then(() => {
+                setupVideoUI();
+            });
             requestAnimationFrame(animate);
 
         }
@@ -560,6 +733,7 @@
             uiDiv.style.display = show ? 'none': 'block';
             toggleUIBtn.textContent = show ? 'Show UI': 'Hide UI';
         };
+        document.getElementById('startCams').onclick = startVideoStreams;
 
         start();
     })();
