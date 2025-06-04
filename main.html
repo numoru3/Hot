@@ -1,138 +1,570 @@
 <!DOCTYPE html>
+
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<title>Klein Bottle Game of Life</title>
-<style>
-    body { margin:0; background:#111; color:#ddd; font-family:monospace; }
-    canvas { background:#000; display:block; margin:auto; }
-    #ui { position:absolute; top:50px; left:50px; padding:10px; background:#222; }
-    #ui input, #ui button, #ui textarea { margin:4px; font-family:monospace; }
+    <meta charset="UTF-8" />
+    <title>Klein Bottle Game of Life</title>
+    <style>
+        body {
+            margin: 0;
+            background: #111;
+            color: #ddd;
+            font-family: monospace;
+        }
+        canvas {
+            display: block;
+            margin: auto;
+            background: #000;
+        }
+        #ui {
+            padding: 10px;
+            background: #222;
+            position: absolute;
+            top: 50px;
+            left: 50px;
+            cursor: move;
+            user-select: none;
+        }
+        #ui input, #ui button, #ui textarea {
+            font-family: monospace;
+            margin: 4px;
+        }
+
+#graphView {
+        margin-top: 10px;
+        white-space: pre;
+        background: #111;
+        padding: 10px;
+        max-height: 200px;
+        overflow: auto;
+    }
+    #toggleUI {
+        position: absolute;
+        top: 5px;
+        right: 10px;
+    }
 </style>
+
+
 </head>
 <body>
-<canvas id="mainCanvas"></canvas>
-<div id="ui">
-    <input type="number" id="numBoards" min="1" value="8">
-    <textarea id="twistInput" rows="4" cols="40"></textarea>
-    <input type="range" id="speedSlider" min="1" max="30" value="10">
-    <button id="restartBtn">Restart</button>
-    <button id="applyTwistBtn">Apply Twist</button>
-    <button id="toggleUIBtn">Show/Hide UI</button>
-    <svg id="graphView" width="400" height="200"></svg>
-</div>
+    <button id="toggleUI">Hide UI</button>
+    <div id="ui">
+        <label>Boards: <input type="number" id="numBoards" min="2" max="50" value="4" /></label>
+        <button id="restart">Restart</button><br />
+        <label>Twist Matrix:</label><br />
+        <textarea id="twistInput" rows="6" cols="60"></textarea><br />
+        <button id="applyTwist">Apply</button>
+        <div id="graphView"></div>
+        <label>Speed: <input type="range" id="speedSlider" min="1" max="30" value="10"></label>
+    </div>
+    <canvas id="graphCanvas" width="600" height="400" style="background:#111; margin-top:10px; display:block; border:1px solid #444;"></canvas>
 
-<script type="module">
-// Config Module
-export const gridW=64, gridH=64;
-export const cellSize=8;
-export const alphaDecay=0.96;
-export const defaultZoom=1.0;
-export const defaultBoardCount=8;
-window.Config={gridW,gridH,cellSize,alphaDecay,defaultZoom,defaultBoardCount};
+<canvas id="canvas" width="800" height="800"></canvas>
+
+<script>
+    (() => {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const gridW = 100, gridH = 100, cellSize = 1;
+        const width = canvas.width, height = canvas.height;
+
+        const numInput = document.getElementById('numBoards');
+        const restartBtn = document.getElementById('restart');
+        const twistInput = document.getElementById('twistInput');
+        const applyTwistBtn = document.getElementById('applyTwist');
+        const graphView = document.getElementById('graphView');
+        const toggleUIBtn = document.getElementById('toggleUI');
+        const uiDiv = document.getElementById('ui');
+        const speedSlider = document.getElementById('speedSlider');
+
+        let boards = [], baseColors = [], twistTensor = [], numBoards = 12;
+        let frameCount = 0, running = true;
+        let zoom = .5;
+        let panX = 0, panY = 0;
+        let lastTouchDistance = null;
+
+        (function enableDragUI() {
+            const ui = document.getElementById('ui');
+            let isDragging = false;
+            let offsetX = 0;
+            let offsetY = 0;
+
+            ui.addEventListener('mousedown', (e) => {
+                if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'BUTTON') return;
+                isDragging = true;
+                offsetX = e.clientX - ui.offsetLeft;
+                offsetY = e.clientY - ui.offsetTop;
+                e.preventDefault();
+            });
+
+            document.addEventListener('mousemove',
+                (e) => {
+                    if (!isDragging) return;
+                    ui.style.left = (e.clientX - offsetX) + 'px';
+                    ui.style.top = (e.clientY - offsetY) + 'px';
+                });
+
+            document.addEventListener('mouseup',
+                () => {
+                    isDragging = false;
+                });
+
+            // Touch support
+            ui.addEventListener('touchstart',
+                (e) => {
+                    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'BUTTON') return;
+                    isDragging = true;
+                    const touch = e.touches[0];
+                    offsetX = touch.clientX - ui.offsetLeft;
+                    offsetY = touch.clientY - ui.offsetTop;
+                },
+                {
+                    passive: true
+                });
+
+            document.addEventListener('touchmove',
+                (e) => {
+                    if (!isDragging) return;
+                    const touch = e.touches[0];
+                    ui.style.left = (touch.clientX - offsetX) + 'px';
+                    ui.style.top = (touch.clientY - offsetY) + 'px';
+                },
+                {
+                    passive: false
+                });
+
+            document.addEventListener('touchend',
+                () => {
+                    isDragging = false;
+                });
+        })();
+
+        const graphCanvas = document.getElementById('graphCanvas');
+        const gctx = graphCanvas.getContext('2d');
+
+        function drawGraph(tensor) {
+            const N = tensor.length;
+            gctx.clearRect(0, 0, graphCanvas.width, graphCanvas.height);
+            gctx.font = '12px monospace';
+
+            const boardSpacingX = graphCanvas.width / (N + 1);
+            const boardSpacingY = graphCanvas.height / 2;
+            const nodeRadius = 10;
+
+            const offsets = {
+                T: [0, -30],
+                B: [0, 30],
+                L: [-30, 0],
+                R: [30, 0],
+            };
+
+            const nodes = [];
+
+            // Draw board nodes
+            for (let i = 0; i < N; i++) {
+                const cx = boardSpacingX * (i + 1);
+                const cy = boardSpacingY;
+
+                const boardNodes = {
+                    T: {
+                        x: cx + offsets.T[0],
+                        y: cy + offsets.T[1]
+                    },
+                    B: {
+                        x: cx + offsets.B[0],
+                        y: cy + offsets.B[1]
+                    },
+                    L: {
+                        x: cx + offsets.L[0],
+                        y: cy + offsets.L[1]
+                    },
+                    R: {
+                        x: cx + offsets.R[0],
+                        y: cy + offsets.R[1]
+                    },
+                    center: {
+                        x: cx,
+                        y: cy
+                    }
+                };
+                nodes.push(boardNodes);
+
+                for (const side in boardNodes) {
+                    if (side === 'center') continue;
+                    const node = boardNodes[side];
+                    gctx.beginPath();
+                    gctx.fillStyle = '#888';
+                    gctx.strokeStyle = '#ddd';
+                    gctx.lineWidth = 2;
+                    gctx.arc(node.x, node.y, nodeRadius, 0, Math.PI * 2);
+                    gctx.fill();
+                    gctx.stroke();
+
+                    gctx.fillStyle = '#ddd';
+                    gctx.fillText(`B${i}${side}`, node.x - 12, node.y + 4);
+                }
+
+                // Draw internal clique
+                const sides = ['T',
+                    'B',
+                    'L',
+                    'R'];
+                for (let s1 = 0; s1 < sides.length; s1++) {
+                    for (let s2 = s1 + 1; s2 < sides.length; s2++) {
+                        const n1 = boardNodes[sides[s1]];
+                        const n2 = boardNodes[sides[s2]];
+                        gctx.beginPath();
+                        gctx.strokeStyle = '#444';
+                        gctx.lineWidth = 1;
+                        gctx.moveTo(n1.x, n1.y);
+                        gctx.lineTo(n2.x, n2.y);
+                        gctx.stroke();
+                    }
+                }
+            }
+
+            // Helper: determine edge color
+            function edgeColor(twist) {
+                if (twist.includes('i')) return 'green';
+                if (parseFloat(twist) < 0) return 'red';
+                return 'gray';
+            }
+
+            // Helper: which boundaries are connected based on twist
+            function mapSides(twistStr) {
+                if (twistStr === '0') return null;
+                const isHorizFlip = twistStr.includes('i');
+                const isVertFlip = parseFloat(twistStr) < 0;
+
+                if (isHorizFlip && isVertFlip) {
+                    return [['T',
+                        'B'],
+                        ['B',
+                            'T'],
+                        ['L',
+                            'R'],
+                        ['R',
+                            'L']];
+                } else if (isHorizFlip) {
+                    return [['T',
+                        'T'],
+                        ['B',
+                            'B'],
+                        ['L',
+                            'R'],
+                        ['R',
+                            'L']];
+                } else if (isVertFlip) {
+                    return [['T',
+                        'B'],
+                        ['B',
+                            'T'],
+                        ['L',
+                            'L'],
+                        ['R',
+                            'R']];
+                } else {
+                    return [['T',
+                        'T'],
+                        ['B',
+                            'B'],
+                        ['L',
+                            'L'],
+                        ['R',
+                            'R']];
+                }
+            }
+
+            // Draw inter-board edges
+            for (let bi = 0; bi < N; bi++) {
+                for (let bj = 0; bj < N; bj++) {
+                    if (bi === bj) continue;
+                    const twist = tensor[bi][bj];
+                    if (!twist || twist === '0') continue; // <== ignore '0'
+
+                    const edges = mapSides(twist);
+                    if (!edges) continue;
+
+                    const fromNodes = nodes[bi];
+                    const toNodes = nodes[bj];
+                    const col = edgeColor(twist);
+
+                    for (const [fromSide, toSide] of edges) {
+                        const from = fromNodes[fromSide];
+                        const to = toNodes[toSide];
+                        gctx.beginPath();
+                        gctx.strokeStyle = col;
+                        gctx.lineWidth = 2;
+                        gctx.moveTo(from.x, from.y);
+                        gctx.lineTo(to.x, to.y);
+                        gctx.stroke();
+
+                        // Draw label
+                        const midX = (from.x + to.x) / 2;
+                        const midY = (from.y + to.y) / 2;
+                        gctx.fillStyle = col;
+                        gctx.fillText(twist, midX + 4, midY - 4);
+
+                        // Arrowhead
+                        const angle = Math.atan2(to.y - from.y, to.x - from.x);
+                        const len = 7,
+                        spread = Math.PI / 8;
+                        const ax1 = to.x - len * Math.cos(angle - spread);
+                        const ay1 = to.y - len * Math.sin(angle - spread);
+                        const ax2 = to.x - len * Math.cos(angle + spread);
+                        const ay2 = to.y - len * Math.sin(angle + spread);
+
+                        gctx.beginPath();
+                        gctx.moveTo(to.x, to.y);
+                        gctx.lineTo(ax1, ay1);
+                        gctx.lineTo(ax2, ay2);
+                        gctx.closePath();
+                        gctx.fillStyle = col;
+                        gctx.fill();
+                    }
+                }
+            }
+        }
+
+
+
+        function getTouchDistance(touches) {
+            if (touches.length < 2) return 0;
+            const dx = touches[0].clientX - touches[1].clientX;
+            const dy = touches[0].clientY - touches[1].clientY;
+            return Math.sqrt(dx * dx + dy * dy);
+        }
+
+        canvas.addEventListener('wheel', e => {
+            e.preventDefault();
+            const delta = -e.deltaY * 0.001;
+            zoom = Math.max(0.1, zoom + delta);
+        });
+
+        canvas.addEventListener('touchstart', e => {
+            if (e.touches.length === 2) {
+                lastTouchDistance = getTouchDistance(e.touches);
+            }
+        });
+
+        canvas.addEventListener('touchmove',
+            e => {
+                if (e.touches.length === 2) {
+                    e.preventDefault();
+                    const currentDist = getTouchDistance(e.touches);
+                    if (lastTouchDistance) {
+                        const delta = (currentDist - lastTouchDistance) * 0.005;
+                        zoom = Math.max(0.1, zoom + delta);
+                    }
+                    lastTouchDistance = currentDist;
+                }
+            },
+            {
+                passive: false
+            });
+
+        function generateRandomTensor(N) {
+            const T = [];
+            for (let i = 0; i < N; i++) {
+                T[i] = [];
+                for (let j = 0; j < N; j++) {
+                    if (i === j) T[i][j] = '0';
+                    else {
+                        const r = Math.random();
+                        T[i][j] = r < 0.4 ? '-60i': r < 0.7 ? '-60': r < 0.9 ? '0': '0';
+                    }
+                }
+            }
+            return T;
+        }
+
+        function tensorToString(T) {
+            return T.map(row => row.join('\t')).join('\n');
+        }
+
+        function parseTwistInput(txt) {
+            return txt.trim().split('\n').map(line =>
+                line.trim().split(/\s+/)
+            );
+        }
+
+        function initBoards(N) {
+            boards = [];
+            colorBuffers = [];
+            baseColors = [];
+            for (let b = 0; b < N; b++) {
+                const grid = [];
+                for (let y = 0; y < gridH; y++) {
+                    grid[y] = [];
+                    for (let x = 0; x < gridW; x++) {
+                        grid[y][x] = Math.random() < 0.15 ? 1: 0;
+                    }
+                }
+                boards.push(grid);
+                colorBuffers.push(new Float32Array(gridW * gridH * 12));
+                baseColors.push({
+                    r: Math.random()  + 0.3,
+                    g: Math.random()  + 0.3,
+                    b: Math.random()  + 0.3,
+                    a: Math.random()  + 0.3
+                });
+            }
+        }
+
+        function getNeighbors(bi, x, y) {
+            const dirs = [[-1,
+                -1],
+                [0,
+                    -1],
+                [1,
+                    -1],
+                [-1,
+                    0],
+                [1,
+                    0],
+                [-1,
+                    1],
+                [0,
+                    1],
+                [1,
+                    1]];
+            let count = 0;
+            for (const [dx, dy] of dirs) {
+                const nx = (x + dx + gridW) % gridW;
+                const ny = (y + dy + gridH) % gridH;
+                count += boards[bi][ny][nx];
+            }
+            for (let bj = 0; bj < numBoards; bj++) {
+                if (bi === bj) continue;
+                let twist = twistTensor[bi][bj];
+                if (twist === '0') continue;
+                let tx = x,
+                ty = y;
+                if (twist.includes('i')) tx = gridW - 1 - x;
+                if (parseFloat(twist) < 0) ty = gridH - 1 - y;
+                for (const [dx, dy] of dirs) {
+                    const nx = (tx + dx + gridW) % gridW;
+                    const ny = (ty + dy + gridH) % gridH;
+                    count += boards[bj][ny][nx];
+                }
+            }
+            return count;
+        }
+
+        function step() {
+            const nextBoards = [];
+            for (let b = 0; b < numBoards; b++) {
+                const newGrid = [];
+                for (let y = 0; y < gridH; y++) {
+                    newGrid[y] = [];
+                    for (let x = 0; x < gridW; x++) {
+                        const n = getNeighbors(b, x, y);
+                        newGrid[y][x] = boards[b][y][x] ? (n === 2 || n === 3 ? 1: 0): (n === 3 ? 1: 0);
+                    }
+                }
+                nextBoards.push(newGrid);
+            }
+            boards = nextBoards;
+        }
+
+        function updateColors() {
+            for (let b = 0; b < numBoards; b++) {
+                const buf = colorBuffers[b],
+                base = baseColors[b];
+                for (let y = 0; y < gridH; y++) {
+                    for (let x = 0; x < gridW; x++) {
+                        const i = (y * gridW + x) * 4;
+                        if (boards[b][y][x]) {
+                            buf[i] += base.r * 0.2;
+                            buf[i+1] += base.g * 0.2;
+                            buf[i+2] += base.b * 0.2;
+                            buf[i+3] += base.a * .1;
+                        }
+                    }
+                }
+            }
+        }
+
+        function draw() {
+            ctx.setTransform(1, 0, 0, 1, 0, 0); // Reset transform
+            ctx.clearRect(0, 0, width, height);
+
+            const drawSize = cellSize * zoom;
+            const offsetX = (width - gridW * drawSize) / 2;
+            const offsetY = (height - gridH * drawSize) / 2;
+
+            for (let b = 0; b < numBoards; b++) {
+                const buf = colorBuffers[b];
+                for (let y = 0; y < gridH; y++) {
+                    for (let x = 0; x < gridW; x++) {
+                        const i = (y * gridW + x) * 4;
+                        const r = Math.min(.5, buf[i]%.5);
+                        const g = Math.min(.5, buf[i+1]%.5);
+                        const bVal = Math.min(.5, buf[i+2]%.5);
+                        const a = Math.min(.5, buf[i+3]%.5);
+                        if (a > 0) {
+                            ctx.fillStyle = `rgba(${r*255},${g*255},${bVal*255},${a})`;
+                            ctx.fillRect(offsetX + x * drawSize, offsetY + y * drawSize, drawSize, drawSize);
+                        }
+                    }
+                }
+            }
+        }
+
+        function animate() {
+            if (!running) return;
+            if (frameCount % parseInt(speedSlider.value) === 0) {
+                step();
+                updateColors();
+            }
+            draw();
+            frameCount++;
+            requestAnimationFrame(animate);
+        }
+
+
+
+        function start() {
+            numBoards = parseInt(numInput.value);
+            twistTensor = generateRandomTensor(numBoards);
+            twistInput.value = tensorToString(twistTensor);
+            initBoards(numBoards);
+            graphView.textContent = tensorToString(twistTensor);
+            drawGraph(twistTensor); // Add this
+            frameCount = 0;
+            running = true;
+            zoom = 1
+            requestAnimationFrame(animate);
+
+        }
+
+        applyTwistBtn.onclick = () => {
+            twistTensor = parseTwistInput(twistInput.value);
+            graphView.textContent = tensorToString(twistTensor);
+            drawGraph(twistTensor); // Add this
+        };
+
+
+
+
+
+
+        restartBtn.onclick = start;
+        applyTwistBtn.onclick = () => {
+            twistTensor = parseTwistInput(twistInput.value);
+            graphView.textContent = tensorToString(twistTensor);
+        };
+        toggleUIBtn.onclick = () => {
+            const show = uiDiv.style.display !== 'none';
+            uiDiv.style.display = show ? 'none': 'block';
+            toggleUIBtn.textContent = show ? 'Show UI': 'Hide UI';
+        };
+
+        start();
+    })();
 </script>
 
-<script type="module">
-// Grid class
-class Grid {
-  constructor(w,h){ this.w=w; this.h=h; this.cells=new Array(h).fill(0).map(()=>new Array(w).fill(0)); }
-  randomize(p=0.5){ for(let y=0;y<this.h;y++) for(let x=0;x<this.w;x++) this.cells[y][x]=Math.random()<p?1:0; }
-  get(x,y){ return this.cells[(y+this.h)%this.h][(x+this.w)%this.w]; }
-  set(x,y,v){ this.cells[(y+this.h)%this.h][(x+this.w)%this.w]=v; }
-  clone(){ const g=new Grid(this.w,this.h); for(let y=0;y<this.h;y++) for(let x=0;x<this.w;x++) g.cells[y][x]=this.cells[y][x]; return g; }
-  clear(){ for(let y=0;y<this.h;y++) for(let x=0;x<this.w;x++) this.cells[y][x]=0; }
-}
-window.Grid=Grid;
-</script>
 
-<script type="module">
-// Neighbor helpers
-const NEIGHBOR_DIRS=[[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]];
-function getNeighbors(boards,tensor,bi,x,y){
-  const {gridW,gridH}=window.Config; let count=0;
-  for(const [dx,dy] of NEIGHBOR_DIRS){ count+=boards[bi].get(x+dx,y+dy); }
-  for(let bj=0;bj<boards.length;bj++){
-    if(bi===bj) continue; const twist=tensor[bi]?.[bj]; if(!twist||twist==='0') continue;
-    const [tx,ty]=applyTwist(x,y,twist);
-    count+=boards[bj].get(tx,ty);
-  }
-  return count;
-}
-window.getNeighbors=getNeighbors;
-window.NEIGHBOR_DIRS=NEIGHBOR_DIRS;
-</script>
-
-<script type="module">
-// Twist helper
-function applyTwist(x,y,twist){
-  const {gridW,gridH}=window.Config;
-  if(twist.includes('i')) x=gridW-1-x;
-  if(parseFloat(twist)<0) y=gridH-1-y;
-  return [(x+gridW)%gridW,(y+gridH)%gridH];
-}
-window.applyTwist=applyTwist;
-</script>
-
-<script type="module">
-// Game class
-class Game{
-  constructor(n,tensor){ this.tensor=tensor; this.boards=[]; this.colorBuffers=[]; this.baseColors=[]; this.initBoards(n); }
-  initBoards(n){ const {gridW,gridH}=window.Config; this.boards=[]; this.colorBuffers=[]; this.baseColors=[]; for(let i=0;i<n;i++){ const g=new Grid(gridW,gridH); g.randomize(0.2); this.boards.push(g); this.colorBuffers.push(new Float32Array(gridW*gridH*4)); this.baseColors.push({r:Math.random(),g:Math.random(),b:Math.random(),a:1}); } }
-  step(){ const {gridW,gridH}=window.Config; const next=this.boards.map(b=>b.clone()); for(let bi=0;bi<this.boards.length;bi++){ for(let y=0;y<gridH;y++){ for(let x=0;x<gridW;x++){ const n=getNeighbors(this.boards,this.tensor,bi,x,y); const alive=this.boards[bi].get(x,y); next[bi].set(x,y,alive?(n===2||n===3?1:0):(n===3?1:0)); } } } this.boards=next; }
-  updateColors(){ const {gridW,gridH,alphaDecay}=window.Config; for(let b=0;b<this.boards.length;b++){ const buf=this.colorBuffers[b]; const base=this.baseColors[b]; for(let i=0;i<buf.length;i++) buf[i]*=alphaDecay; for(let y=0;y<gridH;y++) for(let x=0;x<gridW;x++) if(this.boards[b].get(x,y)){ const idx=(y*gridW+x)*4; buf[idx]+=base.r*0.4; buf[idx+1]+=base.g*0.4; buf[idx+2]+=base.b*0.4; buf[idx+3]=1; } } }
-}
-window.Game=Game;
-</script>
-
-<script type="module">
-// TensorGraph class
-class TensorGraph{
-  constructor(){ this.edges=new Map(); }
-  addEdge(i,j,tw){ if(!this.edges.has(i)) this.edges.set(i,new Map()); this.edges.get(i).set(j,tw); }
-  removeEdge(i,j){ if(this.edges.has(i)) this.edges.get(i).delete(j); }
-  toMatrixString(n){ const rows=[]; for(let i=0;i<n;i++){ const row=[]; for(let j=0;j<n;j++){ const tw=this.edges.get(i)?.get(j)||'0'; row.push(tw); } rows.push(row.join('\t')); } return rows.join('\n'); }
-  fromMatrixString(str){ this.edges=new Map(); const rows=str.trim().split(/\n+/); for(let i=0;i<rows.length;i++){ const cols=rows[i].trim().split(/\s+/); for(let j=0;j<cols.length;j++){ const v=cols[j]; if(v!=='0') this.addEdge(i,j,v); } } }
-}
-window.TensorGraph=TensorGraph;
-</script>
-
-<script type="module">
-// UIManager
-class UIManager{
-  constructor(canvas,ctx,twistTextarea,graphSvg,speedSlider,toggleBtn,numInput,restartBtn,applyBtn){
-    this.canvas=canvas; this.ctx=ctx; this.twistTextarea=twistTextarea; this.graphSvg=graphSvg; this.speedSlider=speedSlider; this.toggleBtn=toggleBtn; this.numInput=numInput; this.restartBtn=restartBtn; this.applyBtn=applyBtn; this.zoom=window.Config.defaultZoom; this.game=null; this.tensor=new TensorGraph(); }
-  start(){ const n=parseInt(this.numInput.value)||window.Config.defaultBoardCount; this.tensor.fromMatrixString(this.twistTextarea.value||''); this.game=new Game(n,this.tensorToMatrix(n)); this.frame=0; requestAnimationFrame(()=>this.animate()); }
-  tensorToMatrix(n){ const m=[]; for(let i=0;i<n;i++){ m[i]=[]; for(let j=0;j<n;j++){ m[i][j]='0'; } } for(const [i,map] of this.tensor.edges){ for(const [j,tw] of map){ m[i][j]=tw; } } return m; }
-  animate(){ if(!this.game){ requestAnimationFrame(()=>this.animate()); return; } if(this.frame%parseInt(this.speedSlider.value)===0){ this.game.step(); this.game.updateColors(); } this.draw(); this.frame++; requestAnimationFrame(()=>this.animate()); }
-  draw(){ const {gridW,gridH,cellSize}=window.Config; const bufW=gridW, bufH=gridH; this.ctx.canvas.width=gridW*cellSize; this.ctx.canvas.height=gridH*cellSize; for(let b=0;b<this.game.boards.length;b++){ const buf=this.game.colorBuffers[b]; for(let y=0;y<bufH;y++){ for(let x=0;x<bufW;x++){ const idx=(y*bufW+x)*4; const r=buf[idx]; const g=buf[idx+1]; const bl=buf[idx+2]; const a=buf[idx+3]; if(a>0.01){ this.ctx.fillStyle=`rgba(${r*255},${g*255},${bl*255},${a})`; this.ctx.fillRect(x*cellSize,y*cellSize,cellSize,cellSize); } } } } }
-}
-window.UIManager=UIManager;
-</script>
-
-<script type="module">
-// drawGraph
-function drawGraph(svg,tensor,n){ while(svg.firstChild) svg.removeChild(svg.firstChild); const width=svg.viewBox.baseVal.width||svg.width.baseVal.value; const height=svg.viewBox.baseVal.height||svg.height.baseVal.value; const r=15; const step=width/(n+1); const nodes=[]; for(let i=0;i<n;i++){ const cx=(i+1)*step; const cy=height/2; const circle=document.createElementNS('http://www.w3.org/2000/svg','circle'); circle.setAttribute('cx',cx); circle.setAttribute('cy',cy); circle.setAttribute('r',r); circle.setAttribute('fill','#333'); circle.setAttribute('stroke','#aaa'); svg.appendChild(circle); const text=document.createElementNS('http://www.w3.org/2000/svg','text'); text.setAttribute('x',cx); text.setAttribute('y',cy+4); text.setAttribute('fill','#eee'); text.setAttribute('text-anchor','middle'); text.textContent=i; svg.appendChild(text); nodes.push({x:cx,y:cy}); }
- for(const [i,map] of tensor.edges){ for(const [j,tw] of map){ const line=document.createElementNS('http://www.w3.org/2000/svg','line'); line.setAttribute('x1',nodes[i].x); line.setAttribute('y1',nodes[i].y); line.setAttribute('x2',nodes[j].x); line.setAttribute('y2',nodes[j].y); line.setAttribute('stroke','#0f0'); svg.appendChild(line); const tx=(nodes[i].x+nodes[j].x)/2; const ty=(nodes[i].y+nodes[j].y)/2; const t=document.createElementNS('http://www.w3.org/200/svg','text'); t.setAttribute('x',tx); t.setAttribute('y',ty-4); t.setAttribute('fill','#f0f'); t.setAttribute('text-anchor','middle'); t.textContent=tw; svg.appendChild(t); } }
-}
-window.drawGraph=drawGraph;
-</script>
-
-<script type="module">
-// DOM Binding and entry
-const canvas=document.getElementById('mainCanvas');
-const ctx=canvas.getContext('2d');
-const numInput=document.getElementById('numBoards');
-const twistInput=document.getElementById('twistInput');
-const restartBtn=document.getElementById('restartBtn');
-const applyTwistBtn=document.getElementById('applyTwistBtn');
-const toggleUIBtn=document.getElementById('toggleUIBtn');
-const speedSlider=document.getElementById('speedSlider');
-const graphSvg=document.getElementById('graphView');
-
-const manager=new UIManager(canvas,ctx,twistInput,graphSvg,speedSlider,toggleUIBtn,numInput,restartBtn,applyTwistBtn);
-restartBtn.onclick=()=>manager.start();
-applyTwistBtn.onclick=()=>{ manager.tensor.fromMatrixString(twistInput.value); drawGraph(graphSvg,manager.tensor,parseInt(numInput.value)); };
-manager.start();
-</script>
 </body>
 </html>
