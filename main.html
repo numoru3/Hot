@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>Klein Bottle Game of Life</title>
+    <style>
+        body {
+            margin: 0;
+            background: #111;
+            color: #ddd;
+            font-family: monospace;
+        }
+        canvas {
+            display: block;
+            margin: auto;
+            background: #000;
+        }
+        #ui {
+            padding: 10px;
+            background: #222;
+            position: absolute;
+            top: 50px;
+            left: 50px;
+            cursor: move;
+            user-select: none;
+        }
+        #ui input, #ui button, #ui textarea {
+            font-family: monospace;
+            margin: 4px;
+        }
+
+#graphView {
+        margin-top: 10px;
+        white-space: pre;
+        background: #111;
+        padding: 10px;
+        max-height: 200px;
+        overflow: auto;
+    }
+    #toggleUI {
+        position: absolute;
+        top: 5px;
+        right: 10px;
+    }
+</style>
+
+
+</head>
+<body>
+    <button id="toggleUI">Hide UI</button>
+    <div id="ui">
+        <label>Boards: <input type="number" id="numBoards" min="2" max="50" value="4" /></label>
+        <button id="restart">Restart</button><br />
+        <label>Twist Matrix:</label><br />
+        <textarea id="twistInput" rows="6" cols="60"></textarea><br />
+        <button id="applyTwist">Apply</button>
+        <div id="graphView"></div>
+        <label>Speed: <input type="range" id="speedSlider" min="1" max="30" value="10"></label>
+    </div>
+    <canvas id="graphCanvas" width="600" height="400" style="background:#111; margin-top:10px; display:block; border:1px solid #444;"></canvas>
+
+<canvas id="canvas" width="800" height="800"></canvas>
+
+<script>
+    (() => {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const gridW = 100, gridH = 100, cellSize = 1;
+        const width = canvas.width, height = canvas.height;
+
+        const numInput = document.getElementById('numBoards');
+        const restartBtn = document.getElementById('restart');
+        const twistInput = document.getElementById('twistInput');
+        const applyTwistBtn = document.getElementById('applyTwist');
+        const graphView = document.getElementById('graphView');
+        const toggleUIBtn = document.getElementById('toggleUI');
+        const uiDiv = document.getElementById('ui');
+        const speedSlider = document.getElementById('speedSlider');
+
+        let boards = [], baseColors = [], twistTensor = [], numBoards = 12;
+        let frameCount = 0, running = true;
+        let zoom = .5;
+        let panX = 0, panY = 0;
+        let lastTouchDistance = null;
+
+        (function enableDragUI() {
+            const ui = document.getElementById('ui');
+            let isDragging = false;
+            let offsetX = 0;
+            let offsetY = 0;
+
+            ui.addEventListener('mousedown', (e) => {
+                if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'BUTTON') return;
+                isDragging = true;
+                offsetX = e.clientX - ui.offsetLeft;
+                offsetY = e.clientY - ui.offsetTop;
+                e.preventDefault();
+            });
+
+            document.addEventListener('mousemove',
+                (e) => {
+                    if (!isDragging) return;
+                    ui.style.left = (e.clientX - offsetX) + 'px';
+                    ui.style.top = (e.clientY - offsetY) + 'px';
+                });
+
+            document.addEventListener('mouseup',
+                () => {
+                    isDragging = false;
+                });
+
+            // Touch support
+            ui.addEventListener('touchstart',
+                (e) => {
+                    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'BUTTON') return;
+                    isDragging = true;
+                    const touch = e.touches[0];
+                    offsetX = touch.clientX - ui.offsetLeft;
+                    offsetY = touch.clientY - ui.offsetTop;
+                },
+                {
+                    passive: true
+                });
+
+            document.addEventListener('touchmove',
+                (e) => {
+                    if (!isDragging) return;
+                    const touch = e.touches[0];
+                    ui.style.left = (touch.clientX - offsetX) + 'px';
+                    ui.style.top = (touch.clientY - offsetY) + 'px';
+                },
+                {
+                    passive: false
+                });
+
+            document.addEventListener('touchend',
+                () => {
+                    isDragging = false;
+                });
+        })();
+
+        const graphCanvas = document.getElementById('graphCanvas');
+        const gctx = graphCanvas.getContext('2d');
+
+        function drawGraph(tensor) {
+            const N = tensor.length;
+            gctx.clearRect(0, 0, graphCanvas.width, graphCanvas.height);
+            gctx.font = '12px monospace';
+
+            const boardSpacingX = graphCanvas.width / (N + 1);
+            const boardSpacingY = graphCanvas.height / 2;
+            const nodeRadius = 10;
+
+            const offsets = {
+                T: [0, -30],
+                B: [0, 30],
+                L: [-30, 0],
+                R: [30, 0],
+            };
+
+            const nodes = [];
+
+            // Draw board nodes
+            for (let i = 0; i < N; i++) {
+                const cx = boardSpacingX * (i + 1);
+                const cy = boardSpacingY;
+
+                const boardNodes = {
+                    T: {
+                        x: cx + offsets.T[0],
+                        y: cy + offsets.T[1]
+                    },
+                    B: {
+                        x: cx + offsets.B[0],
+                        y: cy + offsets.B[1]
+                    },
+                    L: {
+                        x: cx + offsets.L[0],
+                        y: cy + offsets.L[1]
+                    },
+                    R: {
+                        x: cx + offsets.R[0],
+                        y: cy + offsets.R[1]
+                    },
+                    center: {
+                        x: cx,
+                        y: cy
+                    }
+                };
+                nodes.push(boardNodes);
+
+                for (const side in boardNodes) {
+                    if (side === 'center') continue;
+                    const node = boardNodes[side];
+                    gctx.beginPath();
+                    gctx.fillStyle = '#888';
+                    gctx.strokeStyle = '#ddd';
+                    gctx.lineWidth = 2;
+                    gctx.arc(node.x, node.y, nodeRadius, 0, Math.PI * 2);
+                    gctx.fill();
+                    gctx.stroke();
+
+                    gctx.fillStyle = '#ddd';
+                    gctx.fillText(`B${i}${side}`, node.x - 12, node.y + 4);
+                }
+
+                // Draw internal clique
+                const sides = ['T',
+                    'B',
+                    'L',
+                    'R'];
+                for (let s1 = 0; s1 < sides.length; s1++) {
+                    for (let s2 = s1 + 1; s2 < sides.length; s2++) {
+                        const n1 = boardNodes[sides[s1]];
+                        const n2 = boardNodes[sides[s2]];
+                        gctx.beginPath();
+                        gctx.strokeStyle = '#444';
+                        gctx.lineWidth = 1;
+                        gctx.moveTo(n1.x, n1.y);
+                        gctx.lineTo(n2.x, n2.y);
+                        gctx.stroke();
+                    }
+                }
+            }
+
+            // Helper: determine edge color
+            function edgeColor(twist) {
+                if (twist.includes('i')) return 'green';
+                if (parseFloat(twist) < 0) return 'red';
+                return 'gray';
+            }
+
+            // Helper: which boundaries are connected based on twist
+            function mapSides(twistStr) {
+                if (twistStr === '0') return null;
+                const isHorizFlip = twistStr.includes('i');
+                const isVertFlip = parseFloat(twistStr) < 0;
+
+                if (isHorizFlip && isVertFlip) {
+                    return [['T',
+                        'B'],
+                        ['B',
+                            'T'],
+                        ['L',
+                            'R'],
+                        ['R',
+                            'L']];
+                } else if (isHorizFlip) {
+                    return [['T',
+                        'T'],
+                        ['B',
+                            'B'],
+                        ['L',
+                            'R'],
+                        ['R',
+                            'L']];
+                } else if (isVertFlip) {
+                    return [['T',
+                        'B'],
+                        ['B',
+                            'T'],
+                        ['L',
+                            'L'],
+                        ['R',
+                            'R']];
+                } else {
+                    return [['T',
+                        'T'],
+                        ['B',
+                            'B'],
+                        ['L',
+                            'L'],
+                        ['R',
+                            'R']];
+                }
+            }
+
+            // Draw inter-board edges
+            for (let bi = 0; bi < N; bi++) {
+                for (let bj = 0; bj < N; bj++) {
+                    if (bi === bj) continue;
+                    const twist = tensor[bi][bj];
+                    if (!twist || twist === '0') continue; // <== ignore '0'
+
+                    const edges = mapSides(twist);
+                    if (!edges) continue;
+
+                    const fromNodes = nodes[bi];
+                    const toNodes = nodes[bj];
+                    const col = edgeColor(twist);
+
+                    for (const [fromSide, toSide] of edges) {
+                        const from = fromNodes[fromSide];
+                        const to = toNodes[toSide];
+                        gctx.beginPath();
+                        gctx.strokeStyle = col;
+                        gctx.lineWidth = 2;
+                        gctx.moveTo(from.x, from.y);
+                        gctx.lineTo(to.x, to.y);
+                        gctx.stroke();
+
+                        // Draw label
+                        const midX = (from.x + to.x) / 2;
+                        const midY = (from.y + to.y) / 2;
+                        gctx.fillStyle = col;
+                        gctx.fillText(twist, midX + 4, midY - 4);
+
+                        // Arrowhead
+                        const angle = Math.atan2(to.y - from.y, to.x - from.x);
+                        const len = 7,
+                        spread = Math.PI / 8;
+                        const ax1 = to.x - len * Math.cos(angle - spread);
+                        const ay1 = to.y - len * Math.sin(angle - spread);
+                        const ax2 = to.x - len * Math.cos(angle + spread);
+                        const ay2 = to.y - len * Math.sin(angle + spread);
+
+                        gctx.beginPath();
+                        gctx.moveTo(to.x, to.y);
+                        gctx.lineTo(ax1, ay1);
+                        gctx.lineTo(ax2, ay2);
+                        gctx.closePath();
+                        gctx.fillStyle = col;
+                        gctx.fill();
+                    }
+                }
+            }
+        }
+
+
+
+        function getTouchDistance(touches) {
+            if (touches.length < 2) return 0;
+            const dx = touches[0].clientX - touches[1].clientX;
+            const dy = touches[0].clientY - touches[1].clientY;
+            return Math.sqrt(dx * dx + dy * dy);
+        }
+
+        canvas.addEventListener('wheel', e => {
+            e.preventDefault();
+            const delta = -e.deltaY * 0.001;
+            zoom = Math.max(0.1, zoom + delta);
+        });
+
+        canvas.addEventListener('touchstart', e => {
+            if (e.touches.length === 2) {
+                lastTouchDistance = getTouchDistance(e.touches);
+            }
+        });
+
+        canvas.addEventListener('touchmove',
+            e => {
+                if (e.touches.length === 2) {
+                    e.preventDefault();
+                    const currentDist = getTouchDistance(e.touches);
+                    if (lastTouchDistance) {
+                        const delta = (currentDist - lastTouchDistance) * 0.005;
+                        zoom = Math.max(0.1, zoom + delta);
+                    }
+                    lastTouchDistance = currentDist;
+                }
+            },
+            {
+                passive: false
+            });
+
+        function generateRandomTensor(N) {
+            const T = [];
+            for (let i = 0; i < N; i++) {
+                T[i] = [];
+                for (let j = 0; j < N; j++) {
+                    if (i === j) T[i][j] = '0';
+                    else {
+                        const r = Math.random();
+                        T[i][j] = r < 0.4 ? '-60i': r < 0.7 ? '-60': r < 0.9 ? '0': '0';
+                    }
+                }
+            }
+            return T;
+        }
+
+        function tensorToString(T) {
+            return T.map(row => row.join('\t')).join('\n');
+        }
+
+        function parseTwistInput(txt) {
+            return txt.trim().split('\n').map(line =>
+                line.trim().split(/\s+/)
+            );
+        }
+
+        function initBoards(N) {
+            boards = [];
+            colorBuffers = [];
+            baseColors = [];
+            for (let b = 0; b < N; b++) {
+                const grid = [];
+                for (let y = 0; y < gridH; y++) {
+                    grid[y] = [];
+                    for (let x = 0; x < gridW; x++) {
+                        grid[y][x] = Math.random() < 0.15 ? 1: 0;
+                    }
+                }
+                boards.push(grid);
+                colorBuffers.push(new Float32Array(gridW * gridH * 12));
+                baseColors.push({
+                    r: Math.random()  + 0.3,
+                    g: Math.random()  + 0.3,
+                    b: Math.random()  + 0.3,
+                    a: Math.random()  + 0.3
+                });
+            }
+        }
+
+        function getNeighbors(bi, x, y) {
+            const dirs = [[-1,
+                -1],
+                [0,
+                    -1],
+                [1,
+                    -1],
+                [-1,
+                    0],
+                [1,
+                    0],
+                [-1,
+                    1],
+                [0,
+                    1],
+                [1,
+                    1]];
+            let count = 0;
+            for (const [dx, dy] of dirs) {
+                const nx = (x + dx + gridW) % gridW;
+                const ny = (y + dy + gridH) % gridH;
+                count += boards[bi][ny][nx];
+            }
+            for (let bj = 0; bj < numBoards; bj++) {
+                if (bi === bj) continue;
+                let twist = twistTensor[bi][bj];
+                if (twist === '0') continue;
+                let tx = x,
+                ty = y;
+                if (twist.includes('i')) tx = gridW - 1 - x;
+                if (parseFloat(twist) < 0) ty = gridH - 1 - y;
+                for (const [dx, dy] of dirs) {
+                    const nx = (tx + dx + gridW) % gridW;
+                    const ny = (ty + dy + gridH) % gridH;
+                    count += boards[bj][ny][nx];
+                }
+            }
+            return count;
+        }
+
+        function step() {
+            const nextBoards = [];
+            for (let b = 0; b < numBoards; b++) {
+                const newGrid = [];
+                for (let y = 0; y < gridH; y++) {
+                    newGrid[y] = [];
+                    for (let x = 0; x < gridW; x++) {
+                        const n = getNeighbors(b, x, y);
+                        newGrid[y][x] = boards[b][y][x] ? (n === 2 || n === 3 ? 1: 0): (n === 3 ? 1: 0);
+                    }
+                }
+                nextBoards.push(newGrid);
+            }
+            boards = nextBoards;
+        }
+
+        function updateColors() {
+            for (let b = 0; b < numBoards; b++) {
+                const buf = colorBuffers[b],
+                base = baseColors[b];
+                for (let y = 0; y < gridH; y++) {
+                    for (let x = 0; x < gridW; x++) {
+                        const i = (y * gridW + x) * 4;
+                        if (boards[b][y][x]) {
+                            buf[i] += base.r * 0.2;
+                            buf[i+1] += base.g * 0.2;
+                            buf[i+2] += base.b * 0.2;
+                            buf[i+3] += base.a * .1;
+                        }
+                    }
+                }
+            }
+        }
+
+        function draw() {
+            ctx.setTransform(1, 0, 0, 1, 0, 0); // Reset transform
+            ctx.clearRect(0, 0, width, height);
+
+            const drawSize = cellSize * zoom;
+            const offsetX = (width - gridW * drawSize) / 2;
+            const offsetY = (height - gridH * drawSize) / 2;
+
+            for (let b = 0; b < numBoards; b++) {
+                const buf = colorBuffers[b];
+                for (let y = 0; y < gridH; y++) {
+                    for (let x = 0; x < gridW; x++) {
+                        const i = (y * gridW + x) * 4;
+                        const r = Math.min(.5, buf[i]%.5);
+                        const g = Math.min(.5, buf[i+1]%.5);
+                        const bVal = Math.min(.5, buf[i+2]%.5);
+                        const a = Math.min(.5, buf[i+3]%.5);
+                        if (a > 0) {
+                            ctx.fillStyle = `rgba(${r*255},${g*255},${bVal*255},${a})`;
+                            ctx.fillRect(offsetX + x * drawSize, offsetY + y * drawSize, drawSize, drawSize);
+                        }
+                    }
+                }
+            }
+        }
+
+        function animate() {
+            if (!running) return;
+            if (frameCount % parseInt(speedSlider.value) === 0) {
+                step();
+                updateColors();
+            }
+            draw();
+            frameCount++;
+            requestAnimationFrame(animate);
+        }
+
+
+
+        function start() {
+            numBoards = parseInt(numInput.value);
+            twistTensor = generateRandomTensor(numBoards);
+            twistInput.value = tensorToString(twistTensor);
+            initBoards(numBoards);
+            graphView.textContent = tensorToString(twistTensor);
+            drawGraph(twistTensor); // Add this
+            frameCount = 0;
+            running = true;
+            zoom = 1
+            requestAnimationFrame(animate);
+
+        }
+
+        applyTwistBtn.onclick = () => {
+            twistTensor = parseTwistInput(twistInput.value);
+            graphView.textContent = tensorToString(twistTensor);
+            drawGraph(twistTensor); // Add this
+        };
+
+
+
+
+
+
+        restartBtn.onclick = start;
+        applyTwistBtn.onclick = () => {
+            twistTensor = parseTwistInput(twistInput.value);
+            graphView.textContent = tensorToString(twistTensor);
+        };
+        toggleUIBtn.onclick = () => {
+            const show = uiDiv.style.display !== 'none';
+            uiDiv.style.display = show ? 'none': 'block';
+            toggleUIBtn.textContent = show ? 'Show UI': 'Hide UI';
+        };
+
+        start();
+    })();
+</script>
+
+
+</body>
+</html>
