@@ -113,10 +113,7 @@
                     opt.textContent = d.label || 'Camera ' + (i + 1);
                     select.appendChild(opt);
                 });
-                const url = document.createElement('input');
-                url.type = 'text';
-                url.placeholder = 'remote url';
-                url.id = 'url' + b;
+
                 const filter = document.createElement('select');
                 filter.id = 'filterSelect' + b;
                 ['none','edge','motion-gauss','motion-moire'].forEach(f => {
@@ -133,7 +130,7 @@
                 alpha.oninput = () => { boardAlphas[b] = parseFloat(alpha.value); };
                 div.appendChild(document.createTextNode('B'+b+' '));
                 div.appendChild(select);
-                div.appendChild(url);
+
                 div.appendChild(filter);
                 div.appendChild(alpha);
                 vc.appendChild(div);
@@ -145,23 +142,7 @@
             boardFilters = []; boardAlphas = [];
             for (let b = 0; b < numBoards; b++) {
                 const deviceId = document.getElementById('camSelect'+b).value;
-                const url = document.getElementById('url'+b).value.trim();
-                boardFilters[b] = document.getElementById('filterSelect'+b).value;
-                boardAlphas[b] = parseFloat(document.getElementById('alpha'+b).value);
-                try {
-                    let vid;
-                    if (url) {
-                        vid = document.createElement('video');
-                        vid.crossOrigin = 'anonymous';
-                        vid.autoplay = true;
-                        vid.muted = true;
-                        vid.src = url;
-                        await vid.play().catch(()=>{});
-                    } else {
-                        const stream = await navigator.mediaDevices.getUserMedia({video:{deviceId}});
-                        vid = document.createElement('video');
-                        vid.autoplay = true; vid.srcObject = stream;
-                    }
+
                     videos.push(vid);
                 } catch(e) {
                     videos.push(null);
